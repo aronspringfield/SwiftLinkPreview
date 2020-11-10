@@ -84,11 +84,23 @@ open class SwiftLinkPreview: NSObject {
     //Swift-only preview function using Swift specific closure types
     @nonobjc @discardableResult open func preview(_ text: String, onSuccess: @escaping (Response) -> Void, onError: @escaping (PreviewError) -> Void) -> Cancellable {
 
+        if let url = self.extractURL(text: text) {
+            return preview(url, onSuccess: onSuccess, onError: onError)
+        } else {
+            onError(.noURLHasBeenFound(text))
+        }
+
+        return Cancellable()
+    }
+
+    //Swift-only preview function for specific URL
+    @nonobjc @discardableResult open func preview(_ url: URL, onSuccess: @escaping (Response) -> Void, onError: @escaping (PreviewError) -> Void) -> Cancellable {
+
         let cancellable = Cancellable()
 
         self.session = URLSession(configuration: self.session.configuration,
                                   delegate: self, // To handle redirects
-            delegateQueue: self.session.delegateQueue)
+                                  delegateQueue: self.session.delegateQueue)
 
         let successResponseQueue = { (response: Response) in
             if !cancellable.isCancelled {
@@ -109,46 +121,41 @@ open class SwiftLinkPreview: NSObject {
                 }
             }
         }
+        workQueue.async {
+            if cancellable.isCancelled {return}
 
-        if let url = self.extractURL(text: text) {
-            workQueue.async {
-                if cancellable.isCancelled {return}
+            if let result = self.cache.slp_getCachedResponse(url: url.absoluteString) {
+                successResponseQueue(result)
+            } else {
 
-                if let result = self.cache.slp_getCachedResponse(url: url.absoluteString) {
-                    successResponseQueue(result)
-                } else {
+                self.unshortenURL(url, cancellable: cancellable, completion: { unshortened in
+                    if let result = self.cache.slp_getCachedResponse(url: unshortened.absoluteString) {
+                        successResponseQueue(result)
+                    } else {
 
-                    self.unshortenURL(url, cancellable: cancellable, completion: { unshortened in
-                        if let result = self.cache.slp_getCachedResponse(url: unshortened.absoluteString) {
+                        var result = Response()
+                        result.url = url
+                        result.finalUrl = self.extractInURLRedirectionIfNeeded(unshortened)
+                        result.canonicalUrl = self.extractCanonicalURL(unshortened)
+
+                        self.extractInfo(response: result, cancellable: cancellable, completion: {
+
+                            result.title = $0.title
+                            result.description = $0.description
+                            result.image = $0.image
+                            result.images = $0.images
+                            result.icon = $0.icon
+                            result.video = $0.video
+                            result.price = $0.price
+
+                            self.cache.slp_setCachedResponse(url: unshortened.absoluteString, response: result)
+                            self.cache.slp_setCachedResponse(url: url.absoluteString, response: result)
+
                             successResponseQueue(result)
-                        } else {
-                            
-                            var result = Response()
-                            result.url = url
-                            result.finalUrl = self.extractInURLRedirectionIfNeeded(unshortened)
-                            result.canonicalUrl = self.extractCanonicalURL(unshortened)
-
-                            self.extractInfo(response: result, cancellable: cancellable, completion: {
-
-                                result.title = $0.title
-                                result.description = $0.description
-                                result.image = $0.image
-                                result.images = $0.images
-                                result.icon = $0.icon
-                                result.video = $0.video
-                                result.price = $0.price
-
-                                self.cache.slp_setCachedResponse(url: unshortened.absoluteString, response: result)
-                                self.cache.slp_setCachedResponse(url: url.absoluteString, response: result)
-
-                                successResponseQueue(result)
-                            }, onError: errorResponseQueue)
-                        }
-                    }, onError: errorResponseQueue)
-                }
+                        }, onError: errorResponseQueue)
+                    }
+                }, onError: errorResponseQueue)
             }
-        } else {
-            onError(.noURLHasBeenFound(text))
         }
 
         return cancellable
